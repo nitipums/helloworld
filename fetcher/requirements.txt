@@ -2,3 +2,4 @@ yfinance==0.2.54
 pandas==2.2.3
 numpy==2.2.4
 firebase-admin==6.5.0
+requests==2.32.3
