@@ -129,6 +129,7 @@ def get_stocks():
         now   = datetime.now()
         stale = (
             _cache["stocks"] is None
+            or len(_cache["stocks"]) == 0
             or (now - _cache["updated"]).seconds > 3600
         )
         if stale:
