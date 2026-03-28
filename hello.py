@@ -61,8 +61,8 @@ def classify(price, ma50, ma150, ma200, slope200, low52, high52):
 
 def analyze_doc(data):
     try:
-        ticker  = data["ticker"]
-        prices  = data["prices"]
+        ticker  = data.get("ticker") or data.get("symbol", "") + ".BK"
+        prices  = data.get("ohlcv") or data.get("prices", [])
         fetched = data.get("lastUpdated", "")
 
         df = pd.DataFrame(prices)
