@@ -109,7 +109,10 @@ def load_from_firestore():
     docs    = _db.collection("set50").stream()
     results = []
     last_fetched = None
+    raw_count = 0
+    err_count = 0
     for doc in docs:
+        raw_count += 1
         data   = doc.to_dict()
         result = analyze_doc(data)
         if result:
@@ -117,6 +120,9 @@ def load_from_firestore():
             ts = data.get("lastUpdated", "")
             if last_fetched is None or ts > last_fetched:
                 last_fetched = ts
+        else:
+            err_count += 1
+    print(f"[Firestore] docs={raw_count}, ok={len(results)}, skip={err_count}")
     return results, last_fetched
 
 
@@ -449,6 +455,36 @@ def index():
         total=len(stocks),
         fetched=fetched_str,
     )
+
+
+@app.route("/debug")
+def debug():
+    from flask import jsonify
+    try:
+        docs  = list(_db.collection("set50").stream())
+        count = len(docs)
+        sample = docs[0].to_dict() if docs else {}
+        sample.pop("prices", None)   # ซ่อน array ยาว
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify({
+        "firestore_docs":  count,
+        "cache_size":      len(_cache["stocks"]) if _cache["stocks"] else 0,
+        "cache_updated":   _cache["updated"].isoformat() if _cache["updated"] else None,
+        "sample_doc_keys": list(sample.keys()),
+        "sample_doc":      {k: v for k, v in sample.items() if k != "prices"},
+    })
+
+
+@app.route("/refresh")
+def refresh():
+    from flask import jsonify
+    with _lock:
+        _cache["stocks"]  = None
+        _cache["updated"] = None
+        _cache["fetched"] = None
+    return jsonify({"status": "cache cleared, reload / to re-fetch"})
 
 
 if __name__ == "__main__":
