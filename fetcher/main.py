@@ -89,16 +89,33 @@ def fetch_tickers_from_set() -> list[str] | None:
     return sorted(symbols) if symbols else None
 
 
+def get_ticker_df(raw, ticker, tickers):
+    """ดึง DataFrame ของ ticker เดียวจาก raw — รองรับทั้ง 2 column format ของ yfinance"""
+    if len(tickers) == 1:
+        return raw
+
+    lvl0 = raw.columns.get_level_values(0)
+    lvl1 = raw.columns.get_level_values(1) if raw.columns.nlevels > 1 else []
+
+    if ticker in lvl0:                      # format: (ticker, price)
+        return raw[ticker]
+    elif ticker in lvl1:                    # format: (price, ticker)
+        return raw.xs(ticker, axis=1, level=1)
+    return None
+
+
 def process_batch(raw, tickers, db, batch, ops):
     ok = skip = 0
+
+    # log column structure ครั้งแรกเพื่อ debug
+    if raw is not None and not raw.empty:
+        print(f"  raw columns nlevels={raw.columns.nlevels}, "
+              f"lvl0 sample={list(raw.columns.get_level_values(0)[:3])}")
+
     for ticker in tickers:
         sym = ticker.replace(".BK", "")
         try:
-            if len(tickers) == 1:
-                df = raw
-            else:
-                lvl = raw.columns.get_level_values(0)
-                df  = raw[ticker] if ticker in lvl else None
+            df = get_ticker_df(raw, ticker, tickers)
 
             if df is None or df.empty:
                 skip += 1
