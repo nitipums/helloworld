@@ -1,5 +1,5 @@
 flask==3.1.0
 gunicorn==23.0.0
-yfinance==0.2.54
+firebase-admin==6.5.0
 pandas==2.2.3
 numpy==2.2.4
