@@ -10,7 +10,7 @@ import requests
 import firebase_admin
 from firebase_admin import firestore
 from datetime import datetime
-from settrade_v2 import Investor
+from settrade.openapi import Investor
 
 # ── Fallback list ────────────────────────────────────────────────────────────
 FALLBACK_TICKERS = [
@@ -81,12 +81,11 @@ def fetch_and_store(investor: Investor, symbol: str, db) -> bool:
     """ดึง candlestick รายวันย้อนหลัง ~2 ปี แล้วบันทึก Firestore"""
     try:
         # limit=520 ≈ 2 ปีของวันทำการ (252 วัน/ปี)
-        market_data = investor.MarketData()
-        candles = market_data.get_candlestick(
-            symbol=symbol,
-            interval="D",
-            limit=520,
-        )
+        try:
+            candles = investor.get_candlestick(symbol=symbol, interval="1D", limit=520)
+        except AttributeError:
+            market_data = investor.MarketData()
+            candles = market_data.get_candlestick(symbol=symbol, interval="1D", limit=520)
 
         if not candles or len(candles) == 0:
             print(f"  ⚠ {symbol}: no data")
