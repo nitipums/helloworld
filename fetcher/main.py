@@ -1,15 +1,16 @@
 """
-Thai Stock Fetcher — Cloud Run Job
+Thai Stock Fetcher — Cloud Run Job (Settrade Open API)
 1. ดึง ticker list จาก set.or.th (SET + MAI) หรือ fallback
-2. ดาวน์โหลดราคาย้อนหลัง 2 ปี จาก yfinance (sequential + sleep เพื่อหลีกเลี่ยง rate limit)
-3. บันทึกลง Firestore  collection: set50 / document: {TICKER} (ไม่มี .BK)
+2. ดาวน์โหลดราคาย้อนหลัง 2 ปี จาก Settrade Open API
+3. บันทึกลง Firestore  collection: set50 / document: {TICKER}
 """
+import os
 import time
-import yfinance as yf
-import firebase_admin
 import requests
+import firebase_admin
 from firebase_admin import firestore
 from datetime import datetime
+from settrade_v2 import Investor
 
 # ── Fallback list ────────────────────────────────────────────────────────────
 FALLBACK_TICKERS = [
@@ -37,14 +38,9 @@ FALLBACK_TICKERS = [
 ]
 
 SET_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept":          "application/json, text/plain, */*",
-    "Accept-Language": "th-TH,th;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Referer":         "https://www.set.or.th/th/market/product/stock/list",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept": "application/json",
+    "Referer": "https://www.set.or.th/th/market/product/stock/list",
 }
 
 
@@ -56,7 +52,6 @@ def fetch_tickers_from_set() -> list[str] | None:
             r = requests.get(url, headers=SET_HEADERS, timeout=30)
             r.raise_for_status()
             data = r.json()
-
             if isinstance(data, list):
                 raw = [item.get("symbol") or item.get("ticker") for item in data if isinstance(item, dict)]
             elif isinstance(data, dict):
@@ -65,84 +60,84 @@ def fetch_tickers_from_set() -> list[str] | None:
                     raw = [s.get("symbol") for s in raw]
             else:
                 raw = []
-
             added = sum(1 for s in raw if s and symbols.add(s) is None)
             print(f"  {market.upper()}: {added} tickers")
         except Exception as e:
             print(f"  {market.upper()} API error: {e}")
-
     return sorted(symbols) if symbols else None
 
 
-def fetch_and_store(symbol: str, db) -> bool:
-    """ดึงข้อมูล 1 ตัวจาก Yahoo Finance แล้วบันทึก Firestore (retry 3 ครั้ง)"""
-    sym = symbol.replace(".BK", "")
+def get_investor() -> Investor:
+    return Investor(
+        app_id=os.environ["SETTRADE_APP_ID"],
+        app_secret=os.environ["SETTRADE_APP_SECRET"],
+        broker_id=os.environ["SETTRADE_BROKER_ID"],
+        app_code=os.environ["SETTRADE_APP_CODE"],
+        is_auto_queue=False,
+    )
 
-    for attempt in range(3):
-        try:
-            ticker = yf.Ticker(symbol)
-            hist   = ticker.history(period="2y")
 
-            if hist.empty:
-                print(f"  ⚠ {sym}: no data")
-                return False
+def fetch_and_store(investor: Investor, symbol: str, db) -> bool:
+    """ดึง candlestick รายวันย้อนหลัง ~2 ปี แล้วบันทึก Firestore"""
+    try:
+        # limit=520 ≈ 2 ปีของวันทำการ (252 วัน/ปี)
+        market_data = investor.MarketData()
+        candles = market_data.get_candlestick(
+            symbol=symbol,
+            interval="D",
+            limit=520,
+        )
 
-            # ดึงชื่อและ sector (optional)
-            try:
-                info      = ticker.info
-                full_name = info.get("longName", sym)
-                sector    = info.get("sector", "N/A")
-            except Exception:
-                full_name = sym
-                sector    = "N/A"
+        if not candles or len(candles) == 0:
+            print(f"  ⚠ {symbol}: no data")
+            return False
 
-            ohlcv = [
-                {
-                    "date":   index.strftime("%Y-%m-%d"),
-                    "open":   round(float(row["Open"]),   2),
-                    "high":   round(float(row["High"]),   2),
-                    "low":    round(float(row["Low"]),    2),
-                    "close":  round(float(row["Close"]),  2),
-                    "volume": int(row["Volume"]),
-                }
-                for index, row in hist.iterrows()
-            ]
+        ohlcv = [
+            {
+                "date":   c.get("datetime", c.get("date", ""))[:10],
+                "open":   round(float(c.get("open",   0)), 2),
+                "high":   round(float(c.get("high",   0)), 2),
+                "low":    round(float(c.get("low",    0)), 2),
+                "close":  round(float(c.get("close",  0)), 2),
+                "volume": int(c.get("volume", 0)),
+            }
+            for c in candles
+            if c.get("close") and float(c.get("close", 0)) > 0
+        ]
 
-            db.collection("set50").document(sym).set({
-                "symbol":      sym,
-                "ticker":      symbol,
-                "full_name":   full_name,
-                "sector":      sector,
-                "ohlcv":       ohlcv,
-                "prices":      ohlcv,
-                "last_price":  round(float(hist["Close"].iloc[-1]), 2),
-                "count":       len(ohlcv),
-                "lastUpdated": datetime.utcnow().isoformat(),
-            })
-            print(f"  ✅ {sym}: {len(ohlcv)} days")
-            return True
+        if len(ohlcv) < 50:
+            print(f"  ⚠ {symbol}: only {len(ohlcv)} rows")
+            return False
 
-        except Exception as e:
-            wait = 2 ** (attempt + 1)   # 2s, 4s, 8s
-            print(f"  ⚠ {sym} attempt {attempt+1}/3: {e} — retry in {wait}s")
-            time.sleep(wait)
+        db.collection("set50").document(symbol).set({
+            "symbol":      symbol,
+            "ticker":      f"{symbol}.BK",
+            "ohlcv":       ohlcv,
+            "prices":      ohlcv,
+            "last_price":  ohlcv[-1]["close"] if ohlcv else 0,
+            "count":       len(ohlcv),
+            "lastUpdated": datetime.utcnow().isoformat(),
+        })
+        print(f"  ✅ {symbol}: {len(ohlcv)} days")
+        return True
 
-    print(f"  ❌ {sym}: failed after 3 attempts")
-    return False
+    except Exception as e:
+        print(f"  ❌ {symbol}: {e}")
+        return False
 
 
 def main():
     firebase_admin.initialize_app()
     db = firestore.client()
 
-    # ── connectivity test ──────────────────────────────────────────────────
-    print("Testing connectivity…")
-    for test_sym in ["AAPL", "ADVANC.BK"]:
-        try:
-            t = yf.Ticker(test_sym).history(period="5d")
-            print(f"  {test_sym}: {len(t)} rows ✓")
-        except Exception as e:
-            print(f"  {test_sym}: ERROR — {e}")
+    # ── init Settrade ──────────────────────────────────────────────────────
+    print("Connecting to Settrade Open API…")
+    try:
+        investor = get_investor()
+        print("  ✓ Connected")
+    except Exception as e:
+        print(f"  ✗ Connection failed: {e}")
+        return
 
     # ── ดึง ticker list ────────────────────────────────────────────────────
     print(f"\n[{datetime.utcnow().isoformat()}] Fetching ticker list…")
@@ -153,18 +148,17 @@ def main():
         symbols = FALLBACK_TICKERS
         print(f"  ⚠ Fallback: {len(symbols)} tickers")
 
-    # ── download & store (sequential + sleep 0.5s) ─────────────────────────
-    start = time.time()
-    print(f"\nStarting download for {len(symbols)} tickers…")
+    # ── download & store ───────────────────────────────────────────────────
+    start   = time.time()
     success = fail = 0
 
+    print(f"\nDownloading {len(symbols)} tickers…")
     for symbol in symbols:
-        formatted = symbol if symbol.endswith(".BK") else f"{symbol}.BK"
-        if fetch_and_store(formatted, db):
+        if fetch_and_store(investor, symbol, db):
             success += 1
         else:
             fail += 1
-        time.sleep(1.5)   # ป้องกัน Yahoo Finance rate limit
+        time.sleep(0.3)
 
     duration = time.time() - start
     print(f"\n{'='*40}")
