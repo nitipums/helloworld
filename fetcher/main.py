@@ -89,40 +89,49 @@ def fetch_tickers_from_set() -> list[str] | None:
     return sorted(symbols) if symbols else None
 
 
-def get_ticker_df(raw, ticker, tickers):
-    """ดึง DataFrame ของ ticker เดียวจาก raw — รองรับทั้ง 2 column format ของ yfinance"""
-    if len(tickers) == 1:
-        return raw
+def get_ticker_df(raw, ticker, n_tickers):
+    """ดึง DataFrame ของ ticker เดียวจาก raw อย่าง robust"""
+    if n_tickers == 1:
+        return raw  # single ticker = flat DataFrame
+
+    if raw.columns.nlevels == 1:
+        return None  # unexpected structure
 
     lvl0 = raw.columns.get_level_values(0)
-    lvl1 = raw.columns.get_level_values(1) if raw.columns.nlevels > 1 else []
+    lvl1 = raw.columns.get_level_values(1)
 
-    if ticker in lvl0:                      # format: (ticker, price)
-        return raw[ticker]
-    elif ticker in lvl1:                    # format: (price, ticker)
+    if ticker in lvl1:      # yfinance 0.2.x default: (Price, Ticker)
         return raw.xs(ticker, axis=1, level=1)
+    if ticker in lvl0:      # group_by='ticker': (Ticker, Price)
+        return raw[ticker]
     return None
 
 
 def process_batch(raw, tickers, db, batch, ops):
     ok = skip = 0
 
-    # log column structure ครั้งแรกเพื่อ debug
+    # log column structure เพื่อ debug
     if raw is not None and not raw.empty:
-        print(f"  raw columns nlevels={raw.columns.nlevels}, "
-              f"lvl0 sample={list(raw.columns.get_level_values(0)[:3])}")
+        print(f"  [debug] nlevels={raw.columns.nlevels} "
+              f"lvl0={list(raw.columns.get_level_values(0)[:4])} "
+              f"lvl1={list(raw.columns.get_level_values(1)[:4]) if raw.columns.nlevels > 1 else []}")
+    else:
+        print(f"  [debug] raw is empty or None")
+        return batch, ops, 0, len(tickers)
 
     for ticker in tickers:
         sym = ticker.replace(".BK", "")
         try:
-            df = get_ticker_df(raw, ticker, tickers)
+            df = get_ticker_df(raw, ticker, len(tickers))
 
             if df is None or df.empty:
+                print(f"  MISS {sym}: not in columns")
                 skip += 1
                 continue
 
             df = df.dropna(subset=["Close"]).sort_index()
             if len(df) < 50:
+                print(f"  SHORT {sym}: only {len(df)} rows")
                 skip += 1
                 continue
 
@@ -186,9 +195,9 @@ def main():
         print(f"\nBatch {i}/{len(chunks)} ({len(chunk)} tickers)")
         try:
             raw = yf.download(
-                " ".join(chunk), period="2y",
-                group_by="ticker", auto_adjust=True,
-                progress=False, threads=True,
+                chunk, period="2y",
+                auto_adjust=True,
+                progress=False,
             )
             batch, ops, ok, skip = process_batch(raw, chunk, db, batch, ops)
             total_ok   += ok
