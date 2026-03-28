@@ -75,54 +75,60 @@ def fetch_tickers_from_set() -> list[str] | None:
 
 
 def fetch_and_store(symbol: str, db) -> bool:
-    """ดึงข้อมูล 1 ตัวจาก Yahoo Finance แล้วบันทึก Firestore"""
+    """ดึงข้อมูล 1 ตัวจาก Yahoo Finance แล้วบันทึก Firestore (retry 3 ครั้ง)"""
     sym = symbol.replace(".BK", "")
-    try:
-        ticker = yf.Ticker(symbol)
 
-        hist = ticker.history(period="2y")
-        if hist.empty:
-            print(f"  ⚠ {sym}: no data")
-            return False
-
-        # ดึงชื่อและ sector (optional — ไม่ให้ fail ทั้งหมดถ้า info ช้า)
+    for attempt in range(3):
         try:
-            info      = ticker.info
-            full_name = info.get("longName", sym)
-            sector    = info.get("sector", "N/A")
-        except Exception:
-            full_name = sym
-            sector    = "N/A"
+            ticker = yf.Ticker(symbol)
+            hist   = ticker.history(period="2y")
 
-        ohlcv = [
-            {
-                "date":   index.strftime("%Y-%m-%d"),
-                "open":   round(float(row["Open"]),   2),
-                "high":   round(float(row["High"]),   2),
-                "low":    round(float(row["Low"]),    2),
-                "close":  round(float(row["Close"]),  2),
-                "volume": int(row["Volume"]),
-            }
-            for index, row in hist.iterrows()
-        ]
+            if hist.empty:
+                print(f"  ⚠ {sym}: no data")
+                return False
 
-        db.collection("set50").document(sym).set({
-            "symbol":      sym,
-            "ticker":      symbol,          # เก็บทั้ง ADVANC และ ADVANC.BK
-            "full_name":   full_name,
-            "sector":      sector,
-            "ohlcv":       ohlcv,
-            "prices":      ohlcv,           # alias เพื่อ backward compat กับ hello.py
-            "last_price":  round(float(hist["Close"].iloc[-1]), 2),
-            "count":       len(ohlcv),
-            "lastUpdated": datetime.utcnow().isoformat(),
-        })
-        print(f"  ✅ {sym}: {len(ohlcv)} days")
-        return True
+            # ดึงชื่อและ sector (optional)
+            try:
+                info      = ticker.info
+                full_name = info.get("longName", sym)
+                sector    = info.get("sector", "N/A")
+            except Exception:
+                full_name = sym
+                sector    = "N/A"
 
-    except Exception as e:
-        print(f"  ❌ {sym}: {e}")
-        return False
+            ohlcv = [
+                {
+                    "date":   index.strftime("%Y-%m-%d"),
+                    "open":   round(float(row["Open"]),   2),
+                    "high":   round(float(row["High"]),   2),
+                    "low":    round(float(row["Low"]),    2),
+                    "close":  round(float(row["Close"]),  2),
+                    "volume": int(row["Volume"]),
+                }
+                for index, row in hist.iterrows()
+            ]
+
+            db.collection("set50").document(sym).set({
+                "symbol":      sym,
+                "ticker":      symbol,
+                "full_name":   full_name,
+                "sector":      sector,
+                "ohlcv":       ohlcv,
+                "prices":      ohlcv,
+                "last_price":  round(float(hist["Close"].iloc[-1]), 2),
+                "count":       len(ohlcv),
+                "lastUpdated": datetime.utcnow().isoformat(),
+            })
+            print(f"  ✅ {sym}: {len(ohlcv)} days")
+            return True
+
+        except Exception as e:
+            wait = 2 ** (attempt + 1)   # 2s, 4s, 8s
+            print(f"  ⚠ {sym} attempt {attempt+1}/3: {e} — retry in {wait}s")
+            time.sleep(wait)
+
+    print(f"  ❌ {sym}: failed after 3 attempts")
+    return False
 
 
 def main():
@@ -158,7 +164,7 @@ def main():
             success += 1
         else:
             fail += 1
-        time.sleep(0.5)   # ป้องกัน Yahoo Finance rate limit
+        time.sleep(1.5)   # ป้องกัน Yahoo Finance rate limit
 
     duration = time.time() - start
     print(f"\n{'='*40}")
