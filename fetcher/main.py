@@ -4,6 +4,7 @@ Thai Stock Fetcher — Cloud Run Job (Settrade Open API)
 2. ดาวน์โหลดราคาย้อนหลัง 2 ปี จาก Settrade Open API
 3. บันทึกลง Firestore  collection: set50 / document: {TICKER}
 """
+from __future__ import annotations
 import os
 import time
 import requests
