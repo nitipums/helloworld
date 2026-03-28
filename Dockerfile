@@ -9,4 +9,4 @@ COPY hello.py .
 
 EXPOSE 5000
 
-CMD ["python", "hello.py"]
+CMD exec gunicorn --bind 0.0.0.0:$PORT --workers 1 --threads 8 hello:app
