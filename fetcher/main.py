@@ -9,6 +9,7 @@ import firebase_admin
 import requests
 from firebase_admin import firestore
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ── Fallback list (ใช้เมื่อ SET API ไม่ตอบสนอง) ─────────────────────────────
 FALLBACK_TICKERS = [
@@ -170,40 +171,89 @@ def process_batch(raw, tickers, db, batch, ops):
     return batch, ops, ok, skip
 
 
+def download_one(ticker: str):
+    """ดาวน์โหลด ticker เดียว — ใช้ Ticker.history() แทน bulk download"""
+    sym = ticker.replace(".BK", "")
+    try:
+        df = yf.Ticker(ticker).history(period="2y", auto_adjust=True)
+        if df.empty:
+            return ticker, None, f"empty"
+        df = df.dropna(subset=["Close"]).sort_index()
+        if len(df) < 50:
+            return ticker, None, f"only {len(df)} rows"
+        return ticker, df, None
+    except Exception as e:
+        return ticker, None, str(e)
+
+
 def main():
     firebase_admin.initialize_app()
     db = firestore.client()
 
-    # 1. ดึง ticker list จาก SET
-    print(f"[{datetime.utcnow().isoformat()}] Fetching ticker list from set.or.th…")
-    tickers = fetch_tickers_from_set()
+    # ── connectivity test ──────────────────────────────────────────────────
+    print("Testing connectivity…")
+    for test_sym in ["AAPL", "ADVANC.BK"]:
+        try:
+            t = yf.Ticker(test_sym).history(period="5d")
+            print(f"  {test_sym}: {len(t)} rows ✓")
+        except Exception as e:
+            print(f"  {test_sym}: ERROR — {e}")
 
+    # ── ดึง ticker list ────────────────────────────────────────────────────
+    print(f"\n[{datetime.utcnow().isoformat()}] Fetching ticker list from set.or.th…")
+    tickers = fetch_tickers_from_set()
     if tickers:
-        print(f"  ✓ SET API: {len(tickers)} tickers total")
+        print(f"  ✓ SET API: {len(tickers)} tickers")
     else:
         tickers = [f"{t}.BK" for t in FALLBACK_TICKERS]
-        print(f"  ⚠ Using fallback list: {len(tickers)} tickers")
+        print(f"  ⚠ Fallback list: {len(tickers)} tickers")
 
-    # 2. Download ราคาย้อนหลัง 2 ปี (batch ละ 100)
-    chunks     = [tickers[i:i+BATCH_SIZE] for i in range(0, len(tickers), BATCH_SIZE)]
-    total_ok   = total_skip = 0
-    batch      = db.batch()
-    ops        = 0
+    # ── download แบบ parallel (Ticker.history ต่อตัว) ─────────────────────
+    print(f"\nDownloading {len(tickers)} tickers (10 workers)…")
+    total_ok = total_skip = 0
+    batch = db.batch()
+    ops   = 0
 
-    print(f"\nDownloading {len(tickers)} tickers in {len(chunks)} batches…")
-    for i, chunk in enumerate(chunks, 1):
-        print(f"\nBatch {i}/{len(chunks)} ({len(chunk)} tickers)")
-        try:
-            raw = yf.download(
-                chunk, period="2y",
-                auto_adjust=True,
-                progress=False,
-            )
-            batch, ops, ok, skip = process_batch(raw, chunk, db, batch, ops)
-            total_ok   += ok
-            total_skip += skip
-        except Exception as e:
-            print(f"  Batch error: {e}")
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = {pool.submit(download_one, t): t for t in tickers}
+        done = 0
+        for future in as_completed(futures):
+            done += 1
+            ticker, df, err = future.result()
+            sym = ticker.replace(".BK", "")
+
+            if df is None:
+                print(f"  SKIP {sym}: {err}")
+                total_skip += 1
+                continue
+
+            prices = [
+                {
+                    "date":   str(d.date()),
+                    "open":   round(float(r["Open"]),   4),
+                    "high":   round(float(r["High"]),   4),
+                    "low":    round(float(r["Low"]),    4),
+                    "close":  round(float(r["Close"]),  4),
+                    "volume": int(r["Volume"]),
+                }
+                for d, r in df.iterrows()
+            ]
+
+            ref = db.collection("set50").document(ticker)
+            batch.set(ref, {
+                "ticker":      ticker,
+                "prices":      prices,
+                "lastUpdated": datetime.utcnow().isoformat(),
+                "count":       len(prices),
+            })
+            ops       += 1
+            total_ok  += 1
+            print(f"  OK  {sym}: {len(prices)} days  [{done}/{len(tickers)}]")
+
+            if ops >= 400:
+                batch.commit()
+                batch = db.batch()
+                ops   = 0
 
     if ops > 0:
         batch.commit()
