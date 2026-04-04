@@ -1,0 +1,49 @@
+name: Deploy Fundamentals Fetcher Job
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'fetcher/fundamentals.py'
+      - 'fetcher/Dockerfile.fundamentals'
+
+env:
+  JOB:    signalix-fundamentals
+  REGION: asia-southeast1
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy fundamentals job to Cloud Run
+        run: |
+          gcloud run jobs deploy $JOB \
+            --source ./fetcher \
+            --dockerfile ./fetcher/Dockerfile.fundamentals \
+            --region $REGION \
+            --task-timeout 1800 \
+            --set-env-vars "GOOGLE_CLOUD_PROJECT=${{ secrets.GCP_PROJECT_ID }}" \
+            --quiet
+
+      - name: Create Cloud Scheduler trigger (weekly Monday 08:00 BKK)
+        run: |
+          gcloud scheduler jobs create http $JOB-weekly \
+            --schedule="0 8 * * 1" \
+            --time-zone="Asia/Bangkok" \
+            --uri="https://$REGION-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${{ secrets.GCP_PROJECT_ID }}/jobs/$JOB:run" \
+            --oauth-service-account-email=${{ secrets.GCP_SA_EMAIL }} \
+            --location=$REGION \
+            --quiet 2>/dev/null || echo "Scheduler already exists, skipping."

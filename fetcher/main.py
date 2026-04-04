@@ -1,8 +1,9 @@
 """
-Thai Stock Fetcher — Cloud Run Job (Settrade Open API)
+Signalix — Price Fetcher (Cloud Run Job, Settrade Open API)
 1. ดึง ticker list จาก set.or.th (SET + MAI) หรือ fallback
 2. ดาวน์โหลดราคาย้อนหลัง 2 ปี จาก Settrade Open API
-3. บันทึกลง Firestore  collection: set50 / document: {TICKER}
+3. บันทึกลง Firestore  collection: stocks / document: {TICKER}
+4. POST /internal/after-fetch เพื่อ trigger signal + breadth computation
 """
 from __future__ import annotations
 import os
@@ -106,7 +107,7 @@ def fetch_and_store(investor: Investor, symbol: str, db) -> bool:
             print(f"  ⚠ {symbol}: only {len(ohlcv)} rows")
             return False
 
-        db.collection("set50").document(symbol).set({
+        db.collection("stocks").document(symbol).set({
             "symbol":      symbol,
             "ticker":      f"{symbol}.BK",
             "ohlcv":       ohlcv,
@@ -162,6 +163,28 @@ def main():
     print(f"Done — saved: {success}, failed: {fail}")
     print(f"Duration: {duration:.1f}s")
     print(f"{'='*40}")
+
+    # Trigger signal + breadth computation in the Flask app
+    _trigger_after_fetch()
+
+
+def _trigger_after_fetch() -> None:
+    """POST to Flask app to compute signals, breadth, and push LINE alerts."""
+    url    = os.environ.get("AFTER_FETCH_URL", "")
+    secret = os.environ.get("INTERNAL_SECRET", "")
+    if not url:
+        print("\n[after-fetch] AFTER_FETCH_URL not set — skipping trigger")
+        return
+    try:
+        r = requests.post(
+            url,
+            headers={"X-Internal-Secret": secret},
+            timeout=300,
+        )
+        r.raise_for_status()
+        print(f"\n[after-fetch] triggered → {r.status_code}")
+    except Exception as e:
+        print(f"\n[after-fetch] trigger error: {e}")
 
 
 if __name__ == "__main__":

@@ -34,4 +34,5 @@ jobs:
             --region $REGION \
             --platform managed \
             --allow-unauthenticated \
+            --set-env-vars "GOOGLE_CLOUD_PROJECT=${{ secrets.GCP_PROJECT_ID }},LINE_CHANNEL_SECRET=${{ secrets.LINE_CHANNEL_SECRET }},LINE_CHANNEL_ACCESS_TOKEN=${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }},LIFF_ID=${{ secrets.LIFF_ID }},INTERNAL_SECRET=${{ secrets.INTERNAL_SECRET }}" \
             --quiet
